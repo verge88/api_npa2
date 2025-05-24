@@ -1,31 +1,37 @@
-from pydantic import BaseModel
+from dataclasses import dataclass, asdict
 from typing import List, Optional
 from datetime import datetime
 
-class DocumentType(BaseModel):
+@dataclass
+class Document:
+    title: str
+    url: str
+    doc_type: str
+    date: Optional[str] = None
+    number: Optional[str] = None
+    status: Optional[str] = None
+    description: Optional[str] = None
+    content: Optional[str] = None
+
+    def to_dict(self):
+        return asdict(self)
+
+@dataclass
+class DocumentType:
     name: str
     url: str
     count: Optional[int] = None
+    description: Optional[str] = None
 
-class Document(BaseModel):
-    title: str
-    url: str
-    doc_type: str
-    date_published: Optional[str] = None
-    number: Optional[str] = None
-    content: Optional[str] = None
+    def to_dict(self):
+        return asdict(self)
 
-class DocumentDetail(BaseModel):
-    title: str
-    url: str
-    doc_type: str
-    date_published: Optional[str] = None
-    number: Optional[str] = None
-    content: str
-    sections: List[str] = []
-
-class SearchResponse(BaseModel):
-    documents: List[Document]
-    total: int
-    page: int
-    per_page: int
+@dataclass
+class ScrapingResult:
+    success: bool
+    data: List[dict]
+    error: Optional[str] = None
+    total_count: int = 0
+    
+    def to_dict(self):
+        return asdict(self)
