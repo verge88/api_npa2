@@ -1,257 +1,116 @@
-from fastapi import FastAPI, HTTPException, Depends, Query
-from sqlalchemy.orm import Session
-from typing import List, Optional
-import json
-from .models import DocumentType, Document, DocumentDetail, SearchResponse
-from .scraper import MeganormScraper
-from .database import get_db, create_tables, DocumentTypeDB, DocumentDB
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from flask import Flask, jsonify, request
+from scraper import MeganormScraper
+import logging
 
-app = FastAPI(
-    title="Meganorm API",
-    description="API для извлечения документов по пожарной безопасности с сайта meganorm.ru",
-    version="1.0.0"
-)
+app = Flask(__name__)
+app.config['JSON_ENSURE_ASCII'] = False
 
-# Создаем таблицы при запуске
-create_tables()
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
 
 scraper = MeganormScraper()
-executor = ThreadPoolExecutor(max_workers=4)
 
+@app.route('/')
+def index():
+    return jsonify({
+        "message": "Meganorm API",
+        "version": "1.0",
+        "endpoints": {
+            "/api/document-types": "Получить все типы документов",
+            "/api/documents": "Получить документы по типу (параметр: type_url)",
+            "/api/document": "Получить содержимое документа (параметр: url)",
+            "/api/search": "Поиск документов (параметры: query, type, limit)"
+        }
+    })
 
-@app.get("/")
-async def root():
-    return {"message": "Meganorm API - система извлечения документов по пожарной безопасности"}
-
-
-@app.get("/document-types", response_model=List[DocumentType])
-async def get_document_types(db: Session = Depends(get_db)):
+@app.route('/api/document-types', methods=['GET'])
+def get_document_types():
     """Получить все типы документов"""
+    try:
+        result = scraper.get_document_types()
+        return jsonify(result.to_dict())
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
-    # Проверяем, есть ли данные в БД
-    db_types = db.query(DocumentTypeDB).all()
-
-    if not db_types:
-        # Если нет данных в БД, получаем с сайта
-        loop = asyncio.get_event_loop()
-        types_data = await loop.run_in_executor(executor, scraper.get_document_types)
-
-        # Сохраняем в БД
-        for type_data in types_data:
-            db_type = DocumentTypeDB(
-                name=type_data['name'],
-                url=type_data['url']
-            )
-            db.add(db_type)
-
-        db.commit()
-        db_types = db.query(DocumentTypeDB).all()
-
-    return [
-        DocumentType(
-            name=db_type.name,
-            url=db_type.url,
-            count=db_type.count
-        )
-        for db_type in db_types
-    ]
-
-
-@app.get("/documents/{doc_type}", response_model=List[Document])
-async def get_documents_by_type(
-        doc_type: str,
-        page: int = Query(0, ge=0, description="Номер страницы"),
-        db: Session = Depends(get_db)
-):
+@app.route('/api/documents', methods=['GET'])
+def get_documents():
     """Получить документы определенного типа"""
+    type_url = request.args.get('type_url')
+    limit = int(request.args.get('limit', 50))
+    
+    if not type_url:
+        return jsonify({
+            "success": False,
+            "error": "Параметр type_url обязателен"
+        }), 400
+    
+    try:
+        result = scraper.get_documents_by_type(type_url, limit)
+        return jsonify(result.to_dict())
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
-    # Находим тип документа в БД
-    db_type = db.query(DocumentTypeDB).filter(DocumentTypeDB.name.ilike(f"%{doc_type}%")).first()
-
-    if not db_type:
-        raise HTTPException(status_code=404, detail="Тип документа не найден")
-
-    # Получаем документы с сайта
-    loop = asyncio.get_event_loop()
-    documents_data = await loop.run_in_executor(
-        executor,
-        scraper.get_documents_by_type,
-        db_type.url,
-        page
-    )
-
-    documents = []
-    for doc_data in documents_data:
-        # Проверяем, есть ли документ в БД
-        db_doc = db.query(DocumentDB).filter(DocumentDB.url == doc_data['url']).first()
-
-        if not db_doc:
-            # Сохраняем новый документ
-            db_doc = DocumentDB(
-                title=doc_data['title'],
-                url=doc_data['url'],
-                doc_type=db_type.name,
-                date_published=doc_data.get('date_published'),
-                number=doc_data.get('number')
-            )
-            db.add(db_doc)
-
-        documents.append(Document(
-            title=doc_data['title'],
-            url=doc_data['url'],
-            doc_type=db_type.name,
-            date_published=doc_data.get('date_published'),
-            number=doc_data.get('number')
-        ))
-
-    db.commit()
-    return documents
-
-
-@app.get("/document", response_model=DocumentDetail)
-async def get_document_content(
-        url: str = Query(..., description="URL документа"),
-        db: Session = Depends(get_db)
-):
+@app.route('/api/document', methods=['GET'])
+def get_document():
     """Получить полное содержимое документа"""
+    doc_url = request.args.get('url')
+    
+    if not doc_url:
+        return jsonify({
+            "success": False,
+            "error": "Параметр url обязателен"
+        }), 400
+    
+    try:
+        result = scraper.get_document_content(doc_url)
+        return jsonify(result.to_dict())
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
-    # Проверяем, есть ли документ в БД с контентом
-    db_doc = db.query(DocumentDB).filter(DocumentDB.url == url).first()
-
-    if db_doc and db_doc.content:
-        sections = json.loads(db_doc.sections) if db_doc.sections else []
-        return DocumentDetail(
-            title=db_doc.title,
-            url=db_doc.url,
-            doc_type=db_doc.doc_type,
-            date_published=db_doc.date_published,
-            number=db_doc.number,
-            content=db_doc.content,
-            sections=sections
-        )
-
-    # Получаем контент с сайта
-    loop = asyncio.get_event_loop()
-    content_data = await loop.run_in_executor(executor, scraper.get_document_content, url)
-
-    if not content_data['content']:
-        raise HTTPException(status_code=404, detail="Документ не найден или недоступен")
-
-    # Обновляем или создаем запись в БД
-    if db_doc:
-        db_doc.content = content_data['content']
-        db_doc.sections = json.dumps(content_data['sections'])
-        if not db_doc.title:
-            db_doc.title = content_data['title']
-    else:
-        db_doc = DocumentDB(
-            title=content_data['title'],
-            url=url,
-            doc_type="Неизвестно",
-            content=content_data['content'],
-            sections=json.dumps(content_data['sections'])
-        )
-        db.add(db_doc)
-
-    db.commit()
-
-    return DocumentDetail(
-        title=content_data['title'],
-        url=url,
-        doc_type=db_doc.doc_type,
-        date_published=db_doc.date_published,
-        number=db_doc.number,
-        content=content_data['content'],
-        sections=content_data['sections']
-    )
-
-
-@app.get("/search", response_model=SearchResponse)
-async def search_documents(
-        q: str = Query(..., description="Поисковый запрос"),
-        doc_type: Optional[str] = Query(None, description="Фильтр по типу документа"),
-        page: int = Query(1, ge=1, description="Номер страницы"),
-        per_page: int = Query(10, ge=1, le=100, description="Количество результатов на странице"),
-        db: Session = Depends(get_db)
-):
+@app.route('/api/search', methods=['GET'])
+def search_documents():
     """Поиск документов"""
+    query = request.args.get('query')
+    doc_type = request.args.get('type')
+    limit = int(request.args.get('limit', 20))
+    
+    if not query:
+        return jsonify({
+            "success": False,
+            "error": "Параметр query обязателен"
+        }), 400
+    
+    try:
+        result = scraper.search_documents(query, doc_type, limit)
+        return jsonify(result.to_dict())
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
-    # Поиск в БД
-    query = db.query(DocumentDB).filter(DocumentDB.title.ilike(f"%{q}%"))
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        "success": False,
+        "error": "Endpoint не найден"
+    }), 404
 
-    if doc_type:
-        query = query.filter(DocumentDB.doc_type.ilike(f"%{doc_type}%"))
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        "success": False,
+        "error": "Внутренняя ошибка сервера"
+    }), 500
 
-    total = query.count()
-    documents_db = query.offset((page - 1) * per_page).limit(per_page).all()
-
-    documents = [
-        Document(
-            title=doc.title,
-            url=doc.url,
-            doc_type=doc.doc_type,
-            date_published=doc.date_published,
-            number=doc.number,
-            content=doc.content[:200] + "..." if doc.content and len(doc.content) > 200 else doc.content
-        )
-        for doc in documents_db
-    ]
-
-    # Если результатов мало, дополнительно ищем на сайте
-    if len(documents) < per_page:
-        loop = asyncio.get_event_loop()
-        online_docs = await loop.run_in_executor(
-            executor,
-            scraper.search_documents,
-            q,
-            doc_type
-        )
-
-        # Добавляем новые документы, которых нет в БД
-        for doc_data in online_docs[:per_page - len(documents)]:
-            if not any(d.url == doc_data['url'] for d in documents):
-                documents.append(Document(
-                    title=doc_data['title'],
-                    url=doc_data['url'],
-                    doc_type=doc_data.get('doc_type', 'Неизвестно'),
-                    date_published=doc_data.get('date_published'),
-                    number=doc_data.get('number')
-                ))
-
-    return SearchResponse(
-        documents=documents,
-        total=max(total, len(documents)),
-        page=page,
-        per_page=per_page
-    )
-
-
-@app.post("/refresh-types")
-async def refresh_document_types(db: Session = Depends(get_db)):
-    """Обновить список типов документов"""
-
-    loop = asyncio.get_event_loop()
-    types_data = await loop.run_in_executor(executor, scraper.get_document_types)
-
-    # Очищаем старые данные
-    db.query(DocumentTypeDB).delete()
-
-    # Добавляем новые
-    for type_data in types_data:
-        db_type = DocumentTypeDB(
-            name=type_data['name'],
-            url=type_data['url']
-        )
-        db.add(db_type)
-
-    db.commit()
-
-    return {"message": f"Обновлено {len(types_data)} типов документов"}
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
